@@ -50,12 +50,17 @@ class DesktopPet(QMainWindow):
             
         tray_menu = QMenu()
         
-        self.toggle_action = tray_menu.addAction("显示宠物")
+        settings_action = tray_menu.addAction("设置")
+        settings_action.triggered.connect(self.show_settings)
+        
+        tray_menu.addSeparator()
+        
+        self.toggle_action = tray_menu.addAction("隐藏宠物")
         self.toggle_action.triggered.connect(self.toggle_visibility)
         
         tray_menu.addSeparator()
         
-        exit_action = tray_menu.addAction("退出程序")
+        exit_action = tray_menu.addAction("退出")
         exit_action.triggered.connect(QApplication.instance().quit)
         
         self.tray_icon.setContextMenu(tray_menu)
@@ -101,21 +106,41 @@ class DesktopPet(QMainWindow):
     def show_context_menu(self, pos):
         menu = QMenu()
         
+        name_action = menu.addAction("名字")
+        name_action.triggered.connect(self.show_name)
+        
+        mood_action = menu.addAction("情绪")
+        mood_action.triggered.connect(self.show_mood)
+        
+        status_action = menu.addAction("状态")
+        status_action.triggered.connect(self.show_status)
+        
+        menu.addSeparator()
+        
         settings_action = menu.addAction("设置")
         settings_action.triggered.connect(self.show_settings)
         
-        hide_action = menu.addAction("隐藏宠物")
+        hide_action = menu.addAction("捉迷藏")
         hide_action.triggered.connect(self.hide_pet)
         
         menu.addSeparator()
         
-        exit_action = menu.addAction("退出程序")
+        exit_action = menu.addAction("再见")
         exit_action.triggered.connect(QApplication.instance().quit)
         
         menu.exec_(pos)
         
     def show_settings(self):
         QMessageBox.information(self, "设置", "设置功能开发中...")
+        
+    def show_name(self):
+        QMessageBox.information(self, "名字", "宠物名字：未设置\n（功能开发中）")
+        
+    def show_mood(self):
+        QMessageBox.information(self, "情绪", "宠物情绪：开心\n（功能开发中）")
+        
+    def show_status(self):
+        QMessageBox.information(self, "状态", "宠物状态：待机中\n（功能开发中）")
         
     def hide_pet(self):
         self.hide()
