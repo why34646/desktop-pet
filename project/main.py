@@ -86,31 +86,27 @@ class SettingsDialog(QDialog):
             QMessageBox.critical(self, "错误", f"保存失败：{str(e)}")
     
     def load_autostart_status(self):
-        # 读取注册表，检查是否已设置自启动
         try:
             key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, 
                                 r"Software\Microsoft\Windows\CurrentVersion\Run", 
                                 0, winreg.KEY_READ)
             try:
                 winreg.QueryValueEx(key, "DesktopPet")
+                self.autostart_checkbox.blockSignals(True)
                 self.autostart_checkbox.setChecked(True)
+                self.autostart_checkbox.blockSignals(False)
             except WindowsError:
+                self.autostart_checkbox.blockSignals(True)
                 self.autostart_checkbox.setChecked(False)
+                self.autostart_checkbox.blockSignals(False)
             winreg.CloseKey(key)
         except Exception:
+            self.autostart_checkbox.blockSignals(True)
             self.autostart_checkbox.setChecked(False)
+            self.autostart_checkbox.blockSignals(False)
     
     def toggle_autostart(self, state):
-        action = "开启" if state == Qt.Checked else "关闭"
-        reply = QMessageBox.question(
-            self, "确认", 
-            f"确认{action}开机自启动吗？",
-            QMessageBox.Yes | QMessageBox.No
-        )
-        if reply != QMessageBox.Yes:
-            self.autostart_checkbox.blockSignals(True)
-            self.autostart_checkbox.setChecked(not (state == Qt.Checked))
-            self.autostart_checkbox.blockSignals(False)
+        pass
     
     def save_settings(self):
         try:
