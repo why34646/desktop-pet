@@ -1,133 +1,14 @@
 import os
 import sys
+import subprocess
 from pathlib import Path
 from PySide6.QtWidgets import (QApplication, QMainWindow, QMenu, 
-                               QSystemTrayIcon, QStyle, QMessageBox,
-                               QDialog, QVBoxLayout, QHBoxLayout, 
-                               QPushButton, QCheckBox, QInputDialog)
-from PySide6.QtGui import QPixmap, QPainter, QIcon, QCursor
+                               QSystemTrayIcon, QStyle, QMessageBox, QDialog,
+                               QVBoxLayout, QPushButton)
+from PySide6.QtGui import QPixmap, QPainter, QIcon, QCursor, QPen, QColor
 from PySide6.QtCore import Qt, QTimer, QPoint
-import winreg  # Windows 注册表操作
 
-
-class SettingsDialog(QDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.parent_window = parent
-        self.init_ui()
-        
-    def init_ui(self):
-        # 窗口设置
-        self.setWindowTitle("设置")
-        self.resize(400, 300)
-        self.setWindowFlags(Qt.Dialog | Qt.WindowCloseButtonHint)
-        
-        # 布局
-        layout = QVBoxLayout()
-        
-        # 更改姓名按钮
-        change_name_btn = QPushButton("更改姓名")
-        change_name_btn.clicked.connect(self.change_name)
-        layout.addWidget(change_name_btn)
-        
-        # 开机自启动勾选框
-        self.autostart_checkbox = QCheckBox("开机自启动")
-        self.autostart_checkbox.stateChanged.connect(self.toggle_autostart)
-        self.load_autostart_status()
-        layout.addWidget(self.autostart_checkbox)
-        
-        layout.addStretch()
-        
-        button_layout = QHBoxLayout()
-        button_layout.addStretch()
-        
-        close_btn = QPushButton("关闭")
-        close_btn.clicked.connect(self.reject)
-        button_layout.addWidget(close_btn)
-        
-        save_btn = QPushButton("保存")
-        save_btn.clicked.connect(self.save_settings)
-        button_layout.addWidget(save_btn)
-        
-        layout.addLayout(button_layout)
-        
-        self.setLayout(layout)
-    
-    def change_name(self):
-        # 输入姓名
-        while True:
-            new_name, ok = QInputDialog.getText(self, "更改姓名", "请输入新名字：")
-            if not ok:
-                return
-            new_name = new_name.strip()
-            if new_name:
-                break
-            QMessageBox.warning(self, "警告", "名字不能为空！")
-        
-        # 二次确认
-        reply = QMessageBox.question(
-            self, "确认", 
-            f"确认名字为【{new_name}】吗？",
-            QMessageBox.Yes | QMessageBox.No
-        )
-        if reply != QMessageBox.Yes:
-            return
-        
-        # 保存到 basic.txt
-        basic_path = Path(__file__).parent.parent / "basic.txt"
-        try:
-            with open(basic_path, 'w', encoding='utf-8') as f:
-                f.write(new_name)
-            # 更新主窗口
-            if self.parent_window:
-                self.parent_window.pet_name = new_name
-            QMessageBox.information(self, "成功", "姓名已更新！")
-        except Exception as e:
-            QMessageBox.critical(self, "错误", f"保存失败：{str(e)}")
-    
-    def load_autostart_status(self):
-        try:
-            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, 
-                                r"Software\Microsoft\Windows\CurrentVersion\Run", 
-                                0, winreg.KEY_READ)
-            try:
-                winreg.QueryValueEx(key, "DesktopPet")
-                self.autostart_checkbox.blockSignals(True)
-                self.autostart_checkbox.setChecked(True)
-                self.autostart_checkbox.blockSignals(False)
-            except WindowsError:
-                self.autostart_checkbox.blockSignals(True)
-                self.autostart_checkbox.setChecked(False)
-                self.autostart_checkbox.blockSignals(False)
-            winreg.CloseKey(key)
-        except Exception:
-            self.autostart_checkbox.blockSignals(True)
-            self.autostart_checkbox.setChecked(False)
-            self.autostart_checkbox.blockSignals(False)
-    
-    def toggle_autostart(self, state):
-        pass
-    
-    def save_settings(self):
-        try:
-            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, 
-                                r"Software\Microsoft\Windows\CurrentVersion\Run", 
-                                0, winreg.KEY_SET_VALUE)
-            if self.autostart_checkbox.isChecked():
-                script_path = Path(__file__).parent.parent / "start.py"
-                python_exe = sys.executable
-                command = f'"{python_exe}" "{script_path}"'
-                winreg.SetValueEx(key, "DesktopPet", 0, winreg.REG_SZ, command)
-            else:
-                try:
-                    winreg.DeleteValue(key, "DesktopPet")
-                except WindowsError:
-                    pass
-            winreg.CloseKey(key)
-            QMessageBox.information(self, "成功", "设置已保存！")
-            self.accept()
-        except Exception as e:
-            QMessageBox.critical(self, "错误", f"保存失败：{str(e)}")
+from state import StateManager
 
 
 class DesktopPet(QMainWindow):
@@ -137,16 +18,33 @@ class DesktopPet(QMainWindow):
         self.animation_frames = []
         self.current_frame = 0
         self.dragging = False
+        self.resizing = False
         self.drag_position = QPoint()
+        self.resize_start_size = 256
+        self.pet_size = 256
+        self.min_size = 64
+        self.max_size = 512
         self.pet_name = ""
+        self.temp_pos_file = Path(__file__).parent.parent / ".temp_pos"
+        self.resize_cmd_file = Path(__file__).parent.parent / ".resize_cmd"
+        self.name_update_file = Path(__file__).parent.parent / ".name_update"
         
-        self.load_pet_name()
+        # 睡觉状态：None, 'entering', 'looping', 'exiting'
+        self.sleep_stage = None
+        self.sleep_target = None  # 睡觉前/后的目标动作
+        self.sleep2_counter = 0  # 用于减慢 sleep2 的播放速度
+        
+        # 初始化状态管理器
+        self.state_manager = StateManager(Path(__file__).parent.parent / "assets")
+        
+        self.load_basic_info()
         self.init_window()
-        self.load_animation_frames()
+        self.load_current_action_frames()
         self.init_tray()
         self.init_timer()
+        self.check_resize_cmd()
         
-    def load_pet_name(self):
+    def load_basic_info(self):
         basic_path = Path(__file__).parent.parent / "basic.txt"
         if basic_path.exists():
             try:
@@ -154,28 +52,67 @@ class DesktopPet(QMainWindow):
                     lines = f.readlines()
                     if lines:
                         self.pet_name = lines[0].strip()
+                    if len(lines) > 1:
+                        try:
+                            self.pet_size = int(lines[1].strip())
+                            self.pet_size = max(self.min_size, min(self.max_size, self.pet_size))
+                        except Exception:
+                            self.pet_size = 256
             except Exception:
                 pass
-        
+    
+    def save_basic_info(self):
+        basic_path = Path(__file__).parent.parent / "basic.txt"
+        try:
+            with open(basic_path, 'w', encoding='utf-8') as f:
+                f.write(self.pet_name + '\n')
+                f.write(str(self.pet_size) + '\n')
+        except Exception:
+            pass
+    
     def init_window(self):
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.resize(256, 256)
+        self.resize(self.pet_size, self.pet_size)
         
         screen_geometry = QApplication.primaryScreen().availableGeometry()
         x = screen_geometry.width() - self.width() - 20
         y = screen_geometry.height() - self.height() - 20
         self.move(x, y)
         
-    def load_animation_frames(self):
-        assets_path = Path(__file__).parent.parent / "assets" / "idle"
-        if assets_path.exists():
-            png_files = sorted([f for f in assets_path.iterdir() if f.suffix.lower() == '.png'])
-            for png_file in png_files:
-                pixmap = QPixmap(str(png_file))
-                if not pixmap.isNull():
-                    self.animation_frames.append(pixmap)
-                    
+    def load_current_action_frames(self):
+        """加载当前动作的帧数据"""
+        self.animation_frames = self.state_manager.get_current_frames()
+        self.current_frame = 0
+        
+    def load_sleep_frames(self, stage):
+        """加载睡觉指定阶段的帧"""
+        self.animation_frames = self.state_manager.load_sleep_frames(stage)
+        self.current_frame = 0
+        
+    def switch_action(self, action_name):
+        """切换到指定动作"""
+        if self.state_manager.is_sleep_action(action_name):
+            # 进入睡觉流程
+            self.sleep_target = self.state_manager.current_action  # 保存当前动作
+            self.sleep_stage = 'entering'
+            self.sleep2_counter = 0  # 重置计数器
+            self.state_manager.set_action('sleep')
+            self.load_sleep_frames('sleep1')
+        elif self.sleep_stage:
+            # 如果正在睡觉，先退出睡觉
+            self.sleep_stage = 'exiting'
+            self.sleep_target = action_name
+            self.state_manager.set_action('sleep')
+            self.load_sleep_frames('sleep3')
+        else:
+            self.state_manager.set_action(action_name)
+            self.load_current_action_frames()
+        # 确保定时器正常运行
+        if not self.timer.isActive() and self.animation_frames:
+            self.timer.start(100)
+        return True
+        
     def init_tray(self):
         self.tray_icon = QSystemTrayIcon(self)
         
@@ -210,34 +147,102 @@ class DesktopPet(QMainWindow):
             
     def update_frame(self):
         if self.animation_frames:
-            self.current_frame = (self.current_frame + 1) % len(self.animation_frames)
+            # 处理睡觉状态
+            if self.sleep_stage:
+                if self.sleep_stage == 'entering':
+                    # sleep1 播放一次后进入循环
+                    self.current_frame += 1
+                    if self.current_frame >= len(self.animation_frames):
+                        self.sleep_stage = 'looping'
+                        self.sleep2_counter = 0  # 重置计数器
+                        self.load_sleep_frames('sleep2')
+                        self.current_frame = 0
+                elif self.sleep_stage == 'looping':
+                    # sleep2 循环播放，每200ms播放一帧
+                    self.sleep2_counter += 1
+                    if self.sleep2_counter >= 2:
+                        self.sleep2_counter = 0
+                        self.current_frame = (self.current_frame + 1) % len(self.animation_frames)
+                elif self.sleep_stage == 'exiting':
+                    # sleep3 播放一次后切换目标动作
+                    self.current_frame += 1
+                    if self.current_frame >= len(self.animation_frames):
+                        self.sleep_stage = None
+                        self.state_manager.set_action(self.sleep_target)
+                        self.load_current_action_frames()
+                        return
+            else:
+                # 非睡觉状态
+                self.current_frame += 1
+                # 待机动作循环播放
+                if self.state_manager.current_action == 'idle':
+                    self.current_frame = self.current_frame % len(self.animation_frames)
+                # 其他动作播放一次后切换回待机
+                elif self.current_frame >= len(self.animation_frames):
+                    self.switch_action('idle')
+                    self.current_frame = 0
             self.update()
-            
+    
     def paintEvent(self, event):
         painter = QPainter(self)
-        if self.animation_frames:
+        if self.animation_frames and 0 <= self.current_frame < len(self.animation_frames):
             frame = self.animation_frames[self.current_frame]
-            scaled_frame = frame.scaled(256, 256, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            scaled_frame = frame.scaled(self.pet_size, self.pet_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             x = (self.width() - scaled_frame.width()) // 2
             y = (self.height() - scaled_frame.height()) // 2
             painter.drawPixmap(x, y, scaled_frame)
+        
+        if self.resizing:
+            pen = QPen(QColor(0, 0, 255), 3)
+            painter.setPen(pen)
+            painter.drawRect(0, 0, self.width() - 1, self.height() - 1)
             
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            self.dragging = True
-            self.drag_position = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            if self.resizing:
+                self.dragging = True
+                self.drag_position = event.globalPosition().toPoint()
+                self.resize_start_size = self.pet_size
+            else:
+                self.dragging = True
+                self.drag_position = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
             event.accept()
         elif event.button() == Qt.RightButton:
             self.show_context_menu(event.globalPos())
             
     def mouseMoveEvent(self, event):
         if event.buttons() == Qt.LeftButton and self.dragging:
-            self.move(event.globalPosition().toPoint() - self.drag_position)
+            if self.resizing:
+                delta = event.globalPosition().toPoint() - self.drag_position
+                size_change = delta.x() + delta.y()
+                new_size = self.resize_start_size + size_change
+                new_size = max(self.min_size, min(self.max_size, new_size))
+                if new_size != self.pet_size:
+                    self.pet_size = new_size
+                    self.resize(self.pet_size, self.pet_size)
+            else:
+                new_pos = event.globalPosition().toPoint() - self.drag_position
+                
+                # 获取屏幕边界
+                screen_geo = QApplication.primaryScreen().availableGeometry()
+                
+                # 扩大移动范围，四周留出约35像素
+                margin = 35
+            
+                
+                # 限制X坐标：窗口左边界可以超出左边界35像素，右边界可以超出右边界35像素
+                x = max(-margin, min(new_pos.x(), screen_geo.width() - self.width() + margin))
+                
+                # 限制Y坐标：窗口上边界可以超出上边界35像素，下边界可以超出下边界35像素
+                y = max(-margin, min(new_pos.y(), screen_geo.height() - self.height() + margin))
+                
+                self.move(x, y)
             event.accept()
             
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton:
             self.dragging = False
+            self.save_position()
             
     def show_context_menu(self, pos):
         menu = QMenu()
@@ -249,8 +254,10 @@ class DesktopPet(QMainWindow):
         mood_action = menu.addAction("情绪")
         mood_action.triggered.connect(self.show_mood)
         
-        status_action = menu.addAction("状态")
-        status_action.triggered.connect(self.show_status)
+        # 动态显示当前状态名称
+        current_state_name = self.state_manager.get_current_state_name()
+        status_action = menu.addAction(f"状态: {current_state_name}")
+        status_action.triggered.connect(self.show_status_dialog)
         
         menu.addSeparator()
         
@@ -262,14 +269,56 @@ class DesktopPet(QMainWindow):
         
         menu.addSeparator()
         
-        exit_action = menu.addAction("再见bye")
+        exit_action = menu.addAction("Bye-bye")
         exit_action.triggered.connect(QApplication.instance().quit)
         
         menu.exec_(pos)
         
     def show_settings(self):
-        dialog = SettingsDialog(self)
-        dialog.exec_()
+        self.save_position()
+        set_script = Path(__file__).parent / "set.py"
+        subprocess.Popen([sys.executable, str(set_script)])
+        
+    def save_position(self):
+        try:
+            with open(self.temp_pos_file, 'w', encoding='utf-8') as f:
+                f.write(str(self.x()) + '\n')
+                f.write(str(self.y()) + '\n')
+                f.write(str(self.pet_size) + '\n')
+        except Exception:
+            pass
+    
+    def check_resize_cmd(self):
+        # 检查名字更新通知
+        if self.name_update_file.exists():
+            try:
+                self.load_basic_info()
+                self.name_update_file.unlink()
+            except Exception:
+                pass
+        
+        # 检查调整大小命令
+        if self.resize_cmd_file.exists():
+            try:
+                with open(self.resize_cmd_file, 'r', encoding='utf-8') as f:
+                    cmd = f.read().strip()
+                    if cmd == "start":
+                        self.resizing = True
+                        self.update()
+                    elif cmd == "confirm":
+                        self.resizing = False
+                        self.save_basic_info()
+                        self.update()
+                    elif cmd == "cancel":
+                        self.resizing = False
+                        self.load_basic_info()
+                        self.init_window()
+                        self.update()
+                self.resize_cmd_file.unlink()
+            except Exception:
+                pass
+        
+        QTimer.singleShot(100, self.check_resize_cmd)
         
     def show_name(self):
         if self.pet_name:
@@ -280,8 +329,30 @@ class DesktopPet(QMainWindow):
     def show_mood(self):
         QMessageBox.information(self, "情绪", "宠物情绪：开心\n（功能开发中）")
         
-    def show_status(self):
-        QMessageBox.information(self, "状态", "宠物状态：待机中\n（功能开发中）")
+    def show_status_dialog(self):
+        """显示状态选择弹窗"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("选择动作")
+        dialog.setWindowFlags(Qt.Dialog | Qt.WindowStaysOnTopHint)
+        dialog.resize(200, 150)
+        
+        layout = QVBoxLayout()
+        
+        # 获取所有可用动作
+        actions = self.state_manager.get_all_actions()
+        for action_name in actions:
+            display_name = self.state_manager.get_action_display_name(action_name)
+            btn = QPushButton(display_name)
+            btn.clicked.connect(lambda checked, name=action_name: self.on_action_selected(dialog, name))
+            layout.addWidget(btn)
+        
+        dialog.setLayout(layout)
+        dialog.exec_()
+        
+    def on_action_selected(self, dialog, action_name):
+        """选择动作后的处理"""
+        self.switch_action(action_name)
+        dialog.accept()
         
     def hide_pet(self):
         self.hide()

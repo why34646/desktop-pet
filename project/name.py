@@ -21,7 +21,7 @@ class NameInputWindow(QWidget):
         main_layout = QVBoxLayout()
         main_layout.setSpacing(20)
         
-        title_label = QLabel("欢迎来到宠物世界！")
+        title_label = QLabel("Hello~")
         title_label.setAlignment(Qt.AlignCenter)
         title_label.setStyleSheet("font-size: 18px; font-weight: bold;")
         main_layout.addWidget(title_label)

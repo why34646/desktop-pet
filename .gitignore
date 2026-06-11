@@ -1,0 +1,25 @@
+# ===== Python 运行时产物 =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+
+# ===== 本项目特有：运行时信号 / 缓存文件 =====
+.temp_pos
+.resize_cmd
+.name_update
+
+# ===== Trae Agent 运行记录 =====
+.trae/documents/
+
+# ===== IDE / 编辑器 =====
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ===== 操作系统文件 =====
+Thumbs.db
+desktop.ini

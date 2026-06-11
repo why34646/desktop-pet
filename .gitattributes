@@ -1,0 +1,13 @@
+# 统一文本文件换行符处理策略
+* text=auto
+
+*.py   text eol=lf
+*.txt  text eol=lf
+*.md   text eol=lf
+
+# 图片资源声明为二进制，避免被误判为文本
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
