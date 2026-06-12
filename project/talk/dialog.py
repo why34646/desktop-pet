@@ -16,7 +16,7 @@ from PySide6.QtGui import QTextCursor
 sys.path.insert(0, str(Path(__file__).parent))
 
 from config import ConfigManager
-from memory import ShortTermMemory, LongTermMemory
+from memory import ShortTermMemory, LongTermMemory, TempMemory
 from llm import LLMClient, load_identity
 
 
@@ -31,7 +31,9 @@ class TalkDialog(QDialog):
         self.llm_client = LLMClient(self.config_manager)
         self.short_memory = ShortTermMemory()
         self.long_memory = LongTermMemory()
+        self.temp_memory = TempMemory()
         self.identity = load_identity()
+        self.api_ever_worked = False  # 标记 API 是否曾经成功过
         
         # 创建新会话
         self.short_memory.new_session()
@@ -144,7 +146,10 @@ class TalkDialog(QDialog):
             
             # 显示AI回复
             self.append_message("小猫", response)
-            
+
+            # 标记 API 曾成功过
+            self.api_ever_worked = True
+
             # 保存到短时记忆
             self.short_memory.add_conversation(user_input, response)
             self.short_memory.save()
@@ -178,7 +183,7 @@ class TalkDialog(QDialog):
             cursor.insertHtml(f'<p style="margin-left: 10px;">{message}</p>')
         else:
             cursor.insertHtml(f'<p><span style="color: #cc6600;">[{timestamp}] {sender}:</span></p>')
-            cursor.insertHtml(f'<p style="margin-left: 10px; color: #333;">{message}</p>')
+            cursor.insertHtml(f'<p style="margin-left: 10px; color: #ffcc66;">{message}</p>')
         
         cursor.insertHtml("<hr>")
         
@@ -193,23 +198,30 @@ class TalkDialog(QDialog):
     def save_and_close(self):
         """保存记忆并关闭"""
         try:
-            # 获取对话记录
             conversations = self.short_memory.get_conversations()
-            
+
             if conversations:
-                # 生成摘要
-                summary = self.llm_client.generate_summary(conversations, self.identity)
-                
-                # 保存到永久记忆
-                self.long_memory.save_session(conversations, summary)
-            
-            # 保存短时记忆
-            self.short_memory.save()
-            
+                if self.api_ever_worked:
+                    # API 曾经成功过，尝试总结
+                    try:
+                        summary = self.llm_client.generate_summary(conversations, self.identity)
+                        self.long_memory.save_session(conversations, summary)
+                        self.short_memory.delete_current()  # 删除 short 中的会话
+                    except Exception:
+                        # API 失败，保存到 temp
+                        self.temp_memory.save_unsummarized(conversations)
+                        self.short_memory.delete_current()
+                        QMessageBox.warning(self, "警告", "API 不可用，对话已暂存，待下次总结")
+                else:
+                    # API 从未成功过，不保存任何记忆
+                    self.short_memory.delete_current()
+            else:
+                # 没有对话记录，直接关闭
+                pass
+
         except Exception as e:
             QMessageBox.warning(self, "警告", f"保存记忆时出错: {str(e)}")
-        
-        # 关闭窗口
+
         self.close()
     
     def closeEvent(self, event):
@@ -245,31 +257,41 @@ class TalkDialog(QDialog):
 def show_talk_dialog():
     """显示对话窗口"""
     from PySide6.QtWidgets import QMessageBox
-    
+    import json
+
     app = QApplication.instance()
     if app is None:
         app = QApplication(sys.argv)
-    
-    # 检查API配置
+
+    # 检查 API 配置
     config = ConfigManager()
-    if not config.api_key or config.api_key == "your-api-key-here":
-        QMessageBox.critical(
-            None,
-            "错误",
-            "大模型API未配置，请先在 talk/config.json 中配置 API密钥！"
-        )
+    if not config.api_key:
+        QMessageBox.critical(None, "错误", "大模型API未配置！")
         return
-    
-    # 检查身份设定
-    identity = load_identity()
-    # 判断是否为空
-    if not identity.strip():
-        QMessageBox.warning(
-            None,
-            "警告",
-            "身份设定为空，将使用默认身份！"
-        )
-    
+
+    # 检查 temp 目录是否有待总结的会话
+    temp_memory = TempMemory()
+    pending = temp_memory.get_pending_sessions()
+    if pending:
+        # 有待总结的会话，尝试总结
+        llm_client = LLMClient(config)
+        identity = load_identity()
+        long_mem = LongTermMemory()
+        for session_file in pending:
+            try:
+                with open(session_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    conversations = data.get("conversations", [])
+                if conversations:
+                    summary = llm_client.generate_summary(conversations, identity)
+                    long_mem.save_session(conversations, summary)
+                temp_memory.delete_session(session_file)
+            except Exception:
+                break  # API 仍不可用，保留剩余的
+        remaining = temp_memory.get_pending_sessions()
+        if len(remaining) < len(pending):
+            QMessageBox.information(None, "提示", "已总结之前的暂存对话")
+
     dialog = TalkDialog()
     dialog.exec_()
 

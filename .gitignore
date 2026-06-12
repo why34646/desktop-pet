@@ -11,7 +11,10 @@ __pycache__/
 .name_update
 
 # ===== Trae Agent 运行记录 =====
-.trae/documents/
+.trae/
+
+# ===== Agent 对话记忆 =====
+memory/
 
 # ===== IDE / 编辑器 =====
 .vscode/

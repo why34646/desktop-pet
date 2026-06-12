@@ -111,22 +111,65 @@ class ShortTermMemory:
         """清空当前会话"""
         self.conversations = []
         self.current_session_file = None
+    
+    def delete_current(self):
+        """删除当前会话文件"""
+        if self.current_session_file and self.current_session_file.exists():
+            try:
+                self.current_session_file.unlink()
+            except Exception:
+                pass
+        self.conversations = []
+        self.current_session_file = None
+
+
+class TempMemory:
+    """临时记忆管理器 - 保存未总结的会话"""
+
+    def __init__(self, temp_path=None):
+        if temp_path is None:
+            project_root = Path(__file__).parent.parent.parent
+            temp_path = project_root / "memory" / "temp"
+        self.temp_path = Path(temp_path)
+        self.temp_path.mkdir(parents=True, exist_ok=True)
+
+    def save_unsummarized(self, conversations):
+        """保存未总结的会话到 temp"""
+        timestamp = int(time.time())
+        temp_file = self.temp_path / f"pending_{timestamp}.json"
+        data = {"conversations": conversations}
+        try:
+            with open(temp_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            return temp_file
+        except Exception as e:
+            print(f"保存临时记忆失败: {e}")
+            return None
+
+    def get_pending_sessions(self):
+        """获取所有待总结的会话"""
+        return list(self.temp_path.glob("pending_*.json"))
+
+    def delete_session(self, session_file):
+        """删除指定的临时会话文件"""
+        if session_file.exists():
+            session_file.unlink()
 
 
 class LongTermMemory:
     """永久记忆管理器"""
-    
+
     def __init__(self, memory_path=None):
         """
         初始化永久记忆管理器
-        
+
         Args:
             memory_path: 永久记忆文件夹路径，默认使用项目根目录下的 memory/long/
         """
         if memory_path is None:
             project_root = Path(__file__).parent.parent.parent
             memory_path = project_root / "memory" / "long"
-        
+
         self.memory_path = Path(memory_path)
         self.memory_path.mkdir(parents=True, exist_ok=True)
     
