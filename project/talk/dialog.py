@@ -9,7 +9,7 @@ from pathlib import Path
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, 
                               QTextBrowser, QTextEdit, QPushButton,
                               QMessageBox, QApplication)
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QThread, QObject, Signal
 from PySide6.QtGui import QTextCursor
 
 # 添加父目录到路径，以便导入模块
@@ -18,6 +18,47 @@ sys.path.insert(0, str(Path(__file__).parent))
 from config import ConfigManager
 from memory import ShortTermMemory, LongTermMemory, TempMemory
 from llm import LLMClient, load_identity
+
+
+def _escape_html(text):
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;").replace("'", "&#x27;")
+
+
+class TalkWorker(QObject):
+    """后台线程：执行 API 调用"""
+
+    response_ready = Signal(str)
+    error_occurred = Signal(str)
+
+    def __init__(self, config_manager, identity, short_memory, long_memory):
+        super().__init__()
+        self.config_manager = config_manager
+        self.identity = identity
+        self.short_memory = short_memory
+        self.long_memory = long_memory
+        self.llm_client = LLMClient(config_manager)
+
+    def do_chat(self, user_input):
+        try:
+            short_context = self.short_memory.format_for_context()
+            all_summaries = self.long_memory.get_all_summaries()
+
+            need_history, folder_names = self.llm_client.check_need_history(
+                user_input, short_context, all_summaries
+            )
+
+            history_context = ""
+            if need_history:
+                if folder_names:
+                    history_context = self.long_memory.get_history_by_folders(folder_names)
+                if not history_context:
+                    history_context = self.long_memory.format_history_for_context()
+
+            response = self.llm_client.chat(self.identity, user_input, history_context)
+
+            self.response_ready.emit(response)
+        except Exception as e:
+            self.error_occurred.emit(str(e))
 
 
 class TalkDialog(QDialog):
@@ -34,10 +75,19 @@ class TalkDialog(QDialog):
         self.temp_memory = TempMemory()
         self.identity = load_identity()
         self.api_ever_worked = False  # 标记 API 是否曾经成功过
-        
-        # 创建新会话
+        self.is_processing = False
+        self.save_pending = False
+
         self.short_memory.new_session()
-        
+
+        # 后台线程：发送消息
+        self.chat_thread = QThread()
+        self.chat_worker = TalkWorker(self.config_manager, self.identity, self.short_memory, self.long_memory)
+        self.chat_worker.moveToThread(self.chat_thread)
+        self.chat_worker.response_ready.connect(self.on_response_ready)
+        self.chat_worker.error_occurred.connect(self.on_chat_error)
+        self.chat_thread.started.connect(lambda: self.chat_worker.do_chat(self._pending_input))
+
         self.init_ui()
     
     def init_ui(self):
@@ -88,80 +138,61 @@ class TalkDialog(QDialog):
     def on_text_changed(self):
         """输入框文本变化时触发"""
         text = self.input_area.toPlainText().strip()
-        self.send_btn.setEnabled(len(text) > 0)
+        self.send_btn.setEnabled(len(text) > 0 and not self.is_processing)
     
     def on_send_clicked(self):
         """发送按钮点击"""
         user_input = self.input_area.toPlainText().strip()
-        if not user_input:
+        if not user_input or self.is_processing:
             return
         
-        # 清空输入框
+        self.is_processing = True
+        
         self.input_area.clear()
         self.send_btn.setEnabled(False)
         
-        # 显示用户输入
         self.append_message("你", user_input)
+        self.append_thinking()
         
-        # 禁用发送按钮，防止重复点击
-        self.send_btn.setEnabled(False)
         self.input_area.setEnabled(False)
         
-        # 在后台执行请求
-        self.process_user_input(user_input)
-    
-    def process_user_input(self, user_input):
-        """
-        处理用户输入
-        
-        Args:
-            user_input: 用户输入内容
-        """
-        try:
-            # 获取上下文
-            short_context = self.short_memory.format_for_context()
-            long_summary = self.long_memory.get_latest_summary()
-            
-            # 第一轮：询问是否需要历史
-            need_history = self.llm_client.check_need_history(
-                user_input, 
-                short_context, 
-                long_summary
-            )
-            
-            # 获取完整上下文
-            history_context = ""
-            if need_history:
-                # 需要历史对话
-                long_history = self.long_memory.format_history_for_context()
-                if long_history:
-                    history_context = long_history
-            
-            # 第二轮：发送完整请求获取回复
-            response = self.llm_client.chat(
-                self.identity,
-                user_input,
-                history_context
-            )
-            
-            # 显示AI回复
-            self.append_message("小猫", response)
+        self._pending_input = user_input
+        self.chat_thread.start()
 
-            # 标记 API 曾成功过
-            self.api_ever_worked = True
+    def on_response_ready(self, response):
+        """后台线程返回 AI 回复"""
+        self.remove_thinking()
+        self.append_message("小猫", response)
+        self.api_ever_worked = True
+        self.short_memory.add_conversation(self._pending_input, response)
+        self.short_memory.save()
+        self._finish_processing()
 
-            # 保存到短时记忆
-            self.short_memory.add_conversation(user_input, response)
-            self.short_memory.save()
-            
-        except Exception as e:
-            QMessageBox.critical(self, "错误", f"发送消息失败: {str(e)}")
-        
-        finally:
-            # 恢复输入框
-            self.input_area.setEnabled(True)
-            self.send_btn.setEnabled(True)
-            self.input_area.setFocus()
+    def on_chat_error(self, error_msg):
+        """后台线程返回错误"""
+        self.remove_thinking()
+        QMessageBox.critical(self, "错误", f"发送消息失败: {error_msg}")
+        self._finish_processing()
+
+    def _finish_processing(self):
+        self.chat_thread.quit()
+        self.chat_thread.wait()
+        self.is_processing = False
+        self.input_area.setEnabled(True)
+        self.send_btn.setEnabled(True)
+        self.input_area.setFocus()
+
+    def append_thinking(self):
+        """追加思考中提示"""
+        cursor = self.chat_display.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        cursor.insertHtml('<p style="color: #888888; font-style: italic;">小猫思考中...</p>')
+        self.chat_display.setTextCursor(cursor)
+        self.chat_display.ensureCursorVisible()
+
+    def remove_thinking(self):
+        """移除思考中提示（通过重新追加内容实现，QTextBrowser不支持删除行）"""
+        pass
     
     def append_message(self, sender, message):
         """
@@ -179,11 +210,11 @@ class TalkDialog(QDialog):
         timestamp = datetime.now().strftime("%H:%M:%S")
         
         if sender == "你":
-            cursor.insertHtml(f'<p><span style="color: #0066cc;">[{timestamp}] {sender}:</span></p>')
-            cursor.insertHtml(f'<p style="margin-left: 10px;">{message}</p>')
+            cursor.insertHtml(f'<p><span style="color: #0066cc;">[{timestamp}] {_escape_html(sender)}:</span></p>')
+            cursor.insertHtml(f'<p style="margin-left: 10px;">{_escape_html(message)}</p>')
         else:
-            cursor.insertHtml(f'<p><span style="color: #cc6600;">[{timestamp}] {sender}:</span></p>')
-            cursor.insertHtml(f'<p style="margin-left: 10px; color: #ffcc66;">{message}</p>')
+            cursor.insertHtml(f'<p><span style="color: #cc6600;">[{timestamp}] {_escape_html(sender)}:</span></p>')
+            cursor.insertHtml(f'<p style="margin-left: 10px; color: #ffcc66;">{_escape_html(message)}</p>')
         
         cursor.insertHtml("<hr>")
         
@@ -193,61 +224,61 @@ class TalkDialog(QDialog):
     
     def on_end_clicked(self):
         """结束对话按钮点击"""
-        self.save_and_close()
-    
+        self._start_save_and_close()
+
     def save_and_close(self):
-        """保存记忆并关闭"""
-        try:
-            conversations = self.short_memory.get_conversations()
+        self._start_save_and_close()
 
+    def _start_save_and_close(self):
+        if self.save_pending:
+            return
+        self.save_pending = True
+
+        conversations = self.short_memory.get_conversations()
+        print(f"[Dialog] 开始关闭流程，对话数量: {len(conversations)}, api_ever_worked: {self.api_ever_worked}")
+
+        if conversations and self.api_ever_worked:
+            self.hide()
+            QMessageBox.information(None, "提示", "正在整理对话记忆")
+            try:
+                summary = self.llm_client.generate_summary(conversations, self.identity)
+                self.long_memory.save_session(conversations, summary)
+                print("[Dialog] 总结完成，已保存到 long/")
+            except Exception as e:
+                print(f"[Dialog] 总结失败 ({e})，暂存到 temp/")
+                try:
+                    self.temp_memory.save_unsummarized(conversations)
+                    print("[Dialog] 已暂存到 temp/")
+                except Exception as e2:
+                    print(f"[Dialog] 警告：temp 保存也失败: {e2}")
+        else:
             if conversations:
-                if self.api_ever_worked:
-                    # API 曾经成功过，尝试总结
-                    try:
-                        summary = self.llm_client.generate_summary(conversations, self.identity)
-                        self.long_memory.save_session(conversations, summary)
-                        self.short_memory.delete_current()  # 删除 short 中的会话
-                    except Exception:
-                        # API 失败，保存到 temp
-                        self.temp_memory.save_unsummarized(conversations)
-                        self.short_memory.delete_current()
-                        QMessageBox.warning(self, "警告", "API 不可用，对话已暂存，待下次总结")
-                else:
-                    # API 从未成功过，不保存任何记忆
-                    self.short_memory.delete_current()
-            else:
-                # 没有对话记录，直接关闭
-                pass
+                self.short_memory.delete_current()
+                print("[Dialog] 无API记录，已删除 short/")
 
-        except Exception as e:
-            QMessageBox.warning(self, "警告", f"保存记忆时出错: {str(e)}")
+        try:
+            self.short_memory.delete_current()
+            print("[Dialog] short/ 已清理")
+        except Exception:
+            pass
 
-        self.close()
-    
+        self.accept()
+
     def closeEvent(self, event):
-        """
-        窗口关闭事件
-        
-        Args:
-            event: 关闭事件
-        """
-        # 先保存记忆
-        self.save_and_close()
-        event.accept()
+        print(f"[Dialog] closeEvent triggered, is_processing={self.is_processing}, save_pending={self.save_pending}")
+        if self.is_processing:
+            self.chat_worker.response_ready.disconnect(self.on_response_ready)
+            self.chat_worker.error_occurred.disconnect(self.on_chat_error)
+            self.chat_thread.quit()
+        if not self.save_pending:
+            self._start_save_and_close()
+        event.ignore()
     
     def keyPressEvent(self, event):
-        """
-        键盘事件
-        
-        Args:
-            event: 键盘事件
-        """
         if event.key() == Qt.Key_Return and not event.modifiers():
-            # Enter键发送消息
             if self.send_btn.isEnabled():
                 self.on_send_clicked()
         elif event.key() == Qt.Key_Return and event.modifiers() == Qt.ShiftModifier:
-            # Shift+Enter换行
             cursor = self.input_area.textCursor()
             cursor.insertText("\n")
         else:
@@ -266,31 +297,65 @@ def show_talk_dialog():
     # 检查 API 配置
     config = ConfigManager()
     if not config.api_key:
-        QMessageBox.critical(None, "错误", "大模型API未配置！")
+        QMessageBox.critical(None, "错误", "大模型API未配置！请先在设置中配置。")
         return
 
-    # 检查 temp 目录是否有待总结的会话
+    # 收集 short/ 和 temp/ 中的孤儿文件
+    project_root = Path(__file__).resolve().parent.parent.parent
+    short_dir = project_root / "memory" / "short"
+    short_files = list(short_dir.glob("session_*.json")) if short_dir.exists() else []
     temp_memory = TempMemory()
-    pending = temp_memory.get_pending_sessions()
-    if pending:
-        # 有待总结的会话，尝试总结
+    temp_files = temp_memory.get_pending_sessions()
+
+    pending_files = []  # [(path, conversations), ...]
+    for f in short_files:
+        try:
+            with open(f, 'r', encoding='utf-8') as fh:
+                data = json.load(fh)
+                convs = data.get("conversations", [])
+                if isinstance(convs, list) and convs:
+                    pending_files.append((f, convs, "short/"))
+                else:
+                    f.unlink()
+        except Exception:
+            try:
+                f.unlink()
+            except Exception:
+                pass
+    for f in temp_files:
+        try:
+            with open(f, 'r', encoding='utf-8') as fh:
+                data = json.load(fh)
+                convs = data.get("conversations", [])
+                if isinstance(convs, list) and convs:
+                    pending_files.append((f, convs, "temp/"))
+                else:
+                    f.unlink()
+        except Exception:
+            try:
+                f.unlink()
+            except Exception:
+                pass
+
+    if pending_files:
+        print(f"[Dialog] 发现 {len(pending_files)} 个孤儿对话文件 (short+temp)，正在整理...")
+        QMessageBox.information(None, "提示", "正在整理之前的对话记忆")
         llm_client = LLMClient(config)
         identity = load_identity()
         long_mem = LongTermMemory()
-        for session_file in pending:
+        processed = 0
+        for filepath, convs, source in pending_files:
             try:
-                with open(session_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    conversations = data.get("conversations", [])
-                if conversations:
-                    summary = llm_client.generate_summary(conversations, identity)
-                    long_mem.save_session(conversations, summary)
-                temp_memory.delete_session(session_file)
-            except Exception:
-                break  # API 仍不可用，保留剩余的
-        remaining = temp_memory.get_pending_sessions()
-        if len(remaining) < len(pending):
-            QMessageBox.information(None, "提示", "已总结之前的暂存对话")
+                summary = llm_client.generate_summary(convs, identity)
+                long_mem.save_session(convs, summary)
+                filepath.unlink()
+                processed += 1
+                print(f"[Dialog] 已整理 {source}{filepath.name}")
+            except Exception as e:
+                print(f"[Dialog] 整理 {source}{filepath.name} 失败: {e}")
+                break
+        if processed > 0:
+            QMessageBox.information(None, "提示", f"已整理 {processed} 个之前的对话到长期记忆")
 
     dialog = TalkDialog()
     dialog.exec_()

@@ -19,7 +19,9 @@ class LLMClient:
 - 如果问题涉及"之前"、"刚才"、"上次"、"之前说过"、"记得吗"等指代历史的内容，必须回答"需要"
 - 如果问题涉及具体的之前讨论过的内容、名字、事件等，必须回答"需要"
 - 如果问题是一个全新的独立问题，可以立即回答不需要历史，回答"不需要"
-只回答"需要"或"不需要"，不要回答其他内容。"""
+- 如果判断"需要"，请在后面列出最相关的会话编号（多个用逗号分隔），格式示例: "需要:0,2"
+- 如果判断"不需要"，只回答"不需要"
+只回答以上格式，不要回答其他内容。"""
     
     # 摘要生成的系统提示词
     SUMMARY_SYSTEM = """你是一个对话总结助手。请将下面的对话内容总结为简洁的记忆摘要。
@@ -46,7 +48,7 @@ class LLMClient:
         self.model = self.config.model
         self.max_retries = self.config.max_retries
         self.timeout = self.config.timeout
-        self.extra_params = self.config.extra_params
+        self.extra_params = self.config.get_validated_extra_params()
     
     def _make_request(self, messages, retry_count=0):
         """
@@ -133,68 +135,108 @@ class LLMClient:
         
         return self._make_request(messages)
     
-    def check_need_history(self, user_input, short_context="", long_summary=""):
+    def check_need_history(self, user_input, short_context="", summaries=None):
         """
         询问是否需要查看历史对话
-        
+
         Args:
             user_input: 用户当前输入
             short_context: 短时记忆上下文
-            long_summary: 永久记忆摘要
-            
+            summaries: [(folder_name, summary_text), ...] 所有历史会话摘要
+
         Returns:
-            True表示需要历史，False表示不需要
+            (need_history, folder_names)
+            need_history: True表示需要历史，False表示不需要
+            folder_names: 需要加载的文件夹名列表
         """
         context_parts = []
-        
-        if long_summary:
-            context_parts.append(f"长期记忆摘要：\n{long_summary}")
-        
+
+        if summaries:
+            summary_lines = []
+            for i, (folder_name, summary_text) in enumerate(summaries):
+                summary_lines.append(f"[{i}] {folder_name}: {summary_text}")
+            context_parts.append("历史会话摘要：\n" + "\n".join(summary_lines))
+
         if short_context:
             context_parts.append(f"本次对话上下文：\n{short_context}")
-        
+
         context = "\n\n".join(context_parts) if context_parts else "无"
-        
+
         messages = [
             {"role": "system", "content": self.HISTORY_CHECK_SYSTEM},
             {"role": "user", "content": f"当前问题：{user_input}\n\n可用上下文：\n{context}\n\n请判断是否需要查看历史对话？"}
         ]
-        
+
         response = self._make_request(messages).strip()
-        
-        # 解析回答
+
         if "不需要" in response:
-            return False
-        return True
+            return False, []
+
+        folder_names = []
+        if "需要" in response and summaries:
+            colon_idx = response.find(":")
+            if colon_idx != -1:
+                indices_part = response[colon_idx + 1:]
+                try:
+                    for idx_str in indices_part.split(","):
+                        idx = int(idx_str.strip())
+                        if 0 <= idx < len(summaries):
+                            folder_names.append(summaries[idx][0])
+                except (ValueError, IndexError):
+                    pass
+
+        return True, folder_names
     
     def generate_summary(self, conversations, system_prompt):
         """
-        生成对话摘要
-        
+        生成对话摘要（独立发送请求，不包含 extra_params）
+
         Args:
             conversations: 对话记录列表
             system_prompt: 系统提示词
-            
+
         Returns:
             摘要内容
         """
         if not conversations:
             return ""
-        
-        # 格式化对话内容
+
         formatted = []
         for conv in conversations:
             formatted.append(f"用户: {conv.get('user', '')}")
             formatted.append(f"助手: {conv.get('assistant', '')}")
-        
+
         conversation_text = "\n".join(formatted)
-        
+
         messages = [
             {"role": "system", "content": self.SUMMARY_SYSTEM},
             {"role": "user", "content": f"请总结以下对话：\n\n{conversation_text}"}
         ]
-        
-        return self._make_request(messages)
+
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}"
+        }
+
+        data = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": 0.5
+        }
+
+        try:
+            response = requests.post(
+                self.api_url, headers=headers, json=data, timeout=self.timeout
+            )
+            if response.status_code == 200:
+                result = response.json()
+                return result["choices"][0]["message"]["content"]
+            else:
+                raise Exception(f"摘要API请求失败: {response.status_code}")
+        except requests.exceptions.Timeout:
+            raise Exception("摘要请求超时")
+        except requests.exceptions.ConnectionError:
+            raise Exception("无法连接到API服务器")
 
 
 def load_identity(identity_path=None):

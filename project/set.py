@@ -85,6 +85,11 @@ class SettingsDialog(QDialog):
         self.autostart_checkbox.stateChanged.connect(self.toggle_autostart)
         self.load_autostart_status()
         layout.addWidget(self.autostart_checkbox)
+
+        self.console_checkbox = QCheckBox("显示运行框")
+        self.console_checkbox.stateChanged.connect(self.toggle_console)
+        self.load_console_status()
+        layout.addWidget(self.console_checkbox)
         
         layout.addStretch()
         
@@ -148,9 +153,17 @@ class SettingsDialog(QDialog):
             if not ok:
                 return
             new_name = new_name.strip()
-            if new_name:
-                break
-            QMessageBox.warning(self, "警告", "名字不能为空！")
+            if not new_name:
+                QMessageBox.warning(self, "警告", "名字不能为空！")
+                continue
+            if len(new_name) > 20:
+                QMessageBox.warning(self, "警告", "名字不能超过20个字符！")
+                continue
+            invalid_chars = {'\n', '\r', '\t', '\\', '/'}
+            if any(c in new_name for c in invalid_chars):
+                QMessageBox.warning(self, "警告", "名字包含非法字符！")
+                continue
+            break
         
         reply = QMessageBox.question(
             self, "确认", 
@@ -225,15 +238,50 @@ class SettingsDialog(QDialog):
     
     def toggle_autostart(self, state):
         pass
+
+    def load_console_status(self):
+        """加载显示运行框设置"""
+        console_file = Path(__file__).parent.parent / ".console_show"
+        if console_file.exists():
+            try:
+                with open(console_file, 'r', encoding='utf-8') as f:
+                    content = f.read().strip()
+                    self.console_checkbox.blockSignals(True)
+                    self.console_checkbox.setChecked(content == "1")
+                    self.console_checkbox.blockSignals(False)
+            except Exception:
+                pass
+
+    def toggle_console(self, state):
+        """运行框复选框切换"""
+        pass
+
+    def get_python_exe_for_console(self, show_console):
+        """根据设置获取正确的 Python 可执行文件路径"""
+        python_exe = sys.executable
+        if show_console:
+            if "pythonw.exe" in python_exe.lower():
+                python_exe = python_exe.lower().replace("pythonw.exe", "python.exe")
+        else:
+            if "pythonw.exe" not in python_exe.lower():
+                python_exe = python_exe.replace("python.exe", "pythonw.exe")
+        return python_exe
     
     def save_settings(self):
         try:
-            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, 
-                                r"Software\Microsoft\Windows\CurrentVersion\Run", 
+            # 保存显示运行框设置
+            console_file = Path(__file__).parent.parent / ".console_show"
+            show_console = "1" if self.console_checkbox.isChecked() else "0"
+            with open(console_file, 'w', encoding='utf-8') as f:
+                f.write(show_console)
+
+            # 保存开机自启动（用正确的 python 可执行文件）
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r"Software\Microsoft\Windows\CurrentVersion\Run",
                                 0, winreg.KEY_SET_VALUE)
             if self.autostart_checkbox.isChecked():
                 script_path = Path(__file__).parent.parent / "start.py"
-                python_exe = sys.executable
+                python_exe = self.get_python_exe_for_console(self.console_checkbox.isChecked())
                 command = f'"{python_exe}" "{script_path}"'
                 winreg.SetValueEx(key, "DesktopPet", 0, winreg.REG_SZ, command)
             else:
@@ -242,7 +290,7 @@ class SettingsDialog(QDialog):
                 except WindowsError:
                     pass
             winreg.CloseKey(key)
-            
+
             QMessageBox.information(self, "成功", "设置已保存！")
             self.accept()
         except Exception as e:

@@ -48,7 +48,10 @@ class ShortTermMemory:
         try:
             with open(latest_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-                self.conversations = data.get("conversations", [])
+                conversations = data.get("conversations", [])
+                if not isinstance(conversations, list):
+                    return self.new_session()
+                self.conversations = conversations
                 self.current_session_file = latest_file
                 return latest_file
         except Exception:
@@ -250,12 +253,66 @@ class LongTermMemory:
                 try:
                     with open(history_file, 'r', encoding='utf-8') as f:
                         data = json.load(f)
-                        return data.get("conversations", [])
+                        conversations = data.get("conversations", [])
+                        if not isinstance(conversations, list):
+                            continue
+                        return conversations
                 except Exception:
                     continue
         
         return []
     
+    def get_all_summaries(self):
+        """
+        获取所有已总结会话的摘要及其文件夹名
+
+        Returns:
+            [(folder_name, summary_text), ...] 列表
+        """
+        results = []
+        folders = sorted([p for p in self.memory_path.iterdir() if p.is_dir()],
+                        key=lambda p: p.name, reverse=True)
+
+        for folder in folders:
+            summary_file = folder / "summary.txt"
+            if summary_file.exists():
+                try:
+                    with open(summary_file, 'r', encoding='utf-8') as f:
+                        results.append((folder.name, f.read().strip()))
+                except Exception:
+                    continue
+
+        return results
+
+    def get_history_by_folders(self, folder_names):
+        """
+        按指定的文件夹名列表加载历史对话
+
+        Args:
+            folder_names: 文件夹名列表
+
+        Returns:
+            格式化的历史对话字符串
+        """
+        formatted = []
+        for name in folder_names:
+            history_file = self.memory_path / name / "history.json"
+            if not history_file.exists():
+                continue
+            try:
+                with open(history_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    conversations = data.get("conversations", [])
+                    if not isinstance(conversations, list):
+                        continue
+                    for conv in conversations:
+                        formatted.append(f"用户: {conv['user']}")
+                        formatted.append(f"助手: {conv['assistant']}")
+            except Exception:
+                continue
+
+        return "\n".join(formatted)
+
     def format_history_for_context(self):
         """
         格式化历史对话用于上下文拼接

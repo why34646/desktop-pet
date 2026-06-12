@@ -106,6 +106,15 @@ class NameInputWindow(QWidget):
         if not name:
             QMessageBox.warning(self, "警告", "姓名不能为空！")
             return
+
+        if len(name) > 20:
+            QMessageBox.warning(self, "警告", "姓名不能超过20个字符！")
+            return
+
+        invalid_chars = {'\n', '\r', '\t', '\\', '/'}
+        if any(c in name for c in invalid_chars):
+            QMessageBox.warning(self, "警告", "姓名包含非法字符！")
+            return
             
         reply = QMessageBox.question(
             self, 

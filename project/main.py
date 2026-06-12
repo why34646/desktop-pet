@@ -298,33 +298,38 @@ class DesktopPet(QMainWindow):
     
     def check_resize_cmd(self):
         # 检查名字更新通知
-        if self.name_update_file.exists():
-            try:
-                self.load_basic_info()
-                self.name_update_file.unlink()
-            except Exception:
-                pass
+        try:
+            self.load_basic_info()
+            self.name_update_file.unlink()
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
         
         # 检查调整大小命令
-        if self.resize_cmd_file.exists():
+        try:
+            with open(self.resize_cmd_file, 'r', encoding='utf-8') as f:
+                cmd = f.read().strip()
+                if cmd == "start":
+                    self.resizing = True
+                    self.update()
+                elif cmd == "confirm":
+                    self.resizing = False
+                    self.save_basic_info()
+                    self.update()
+                elif cmd == "cancel":
+                    self.resizing = False
+                    self.load_basic_info()
+                    self.init_window()
+                    self.update()
             try:
-                with open(self.resize_cmd_file, 'r', encoding='utf-8') as f:
-                    cmd = f.read().strip()
-                    if cmd == "start":
-                        self.resizing = True
-                        self.update()
-                    elif cmd == "confirm":
-                        self.resizing = False
-                        self.save_basic_info()
-                        self.update()
-                    elif cmd == "cancel":
-                        self.resizing = False
-                        self.load_basic_info()
-                        self.init_window()
-                        self.update()
                 self.resize_cmd_file.unlink()
-            except Exception:
+            except FileNotFoundError:
                 pass
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
         
         QTimer.singleShot(100, self.check_resize_cmd)
         

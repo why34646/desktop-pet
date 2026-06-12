@@ -10,6 +10,8 @@ from pathlib import Path
 
 class ConfigManager:
     """配置管理器类"""
+
+    ALLOWED_EXTRA_PARAMS = {"reasoning_effort", "thinking"}
     
     def __init__(self, config_path=None):
         """
@@ -38,6 +40,8 @@ class ConfigManager:
                 self._config = self._get_default_config()
         else:
             self._config = self._get_default_config()
+
+        self._migrate_api_keys()
     
     def save(self):
         """保存配置到文件"""
@@ -50,6 +54,43 @@ class ConfigManager:
         except Exception as e:
             print(f"保存配置文件失败: {e}")
             return False
+
+    def _migrate_api_keys(self):
+        """将配置文件中的旧 api_key 迁移到注册表并从内存中移除"""
+        modified = False
+        for provider in ("deepseek", "openai"):
+            provider_config = self._config.get(provider, {})
+            if "api_key" in provider_config:
+                api_key = provider_config.pop("api_key")
+                modified = True
+                if api_key and api_key != "your-api-key-here":
+                    self._set_registry_key(provider.upper() + "_API_KEY", api_key)
+        if modified:
+            self.save()
+
+    def _set_registry_key(self, name, value):
+        """写入注册表持久化环境变量"""
+        try:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment", 0, winreg.KEY_SET_VALUE)
+            winreg.SetValueEx(key, name, 0, winreg.REG_SZ, value)
+            winreg.CloseKey(key)
+            return True
+        except Exception:
+            return False
+
+    def _get_registry_key(self, name):
+        """从注册表读取持久化环境变量"""
+        try:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment", 0, winreg.KEY_READ)
+            try:
+                value, _ = winreg.QueryValueEx(key, name)
+                winreg.CloseKey(key)
+                return value
+            except WindowsError:
+                winreg.CloseKey(key)
+                return ""
+        except Exception:
+            return ""
     
     def _get_default_config(self):
         """获取默认配置"""
@@ -57,7 +98,6 @@ class ConfigManager:
             "provider": "deepseek",
             "deepseek": {
                 "api_url": "https://api.deepseek.com/v1/chat/completions",
-                "api_key": "your-api-key-here",
                 "model": "deepseek-v4-pro",
                 "max_retries": 3,
                 "timeout": 60,
@@ -68,7 +108,6 @@ class ConfigManager:
             },
             "openai": {
                 "api_url": "https://api.openai.com/v1/chat/completions",
-                "api_key": "your-api-key-here",
                 "model": "gpt-3.5-turbo",
                 "max_retries": 3,
                 "timeout": 60,
@@ -148,17 +187,7 @@ class ConfigManager:
         """获取API密钥，从持久化环境变量读取"""
         provider = self.provider.upper()
         env_key = f"{provider}_API_KEY"
-        try:
-            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Environment", 0, winreg.KEY_READ)
-            try:
-                value, _ = winreg.QueryValueEx(key, env_key)
-                winreg.CloseKey(key)
-                return value
-            except WindowsError:
-                winreg.CloseKey(key)
-                return ""
-        except Exception:
-            return ""
+        return self._get_registry_key(env_key)
     
     @api_key.setter
     def api_key(self, value):
@@ -189,3 +218,10 @@ class ConfigManager:
     def extra_params(self):
         """获取额外参数"""
         return self.get("extra_params", {})
+
+    def get_validated_extra_params(self):
+        """获取经过白名单过滤的额外参数"""
+        raw = self.extra_params
+        if not isinstance(raw, dict):
+            return {}
+        return {k: v for k, v in raw.items() if k in self.ALLOWED_EXTRA_PARAMS}
