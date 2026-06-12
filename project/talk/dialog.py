@@ -5,6 +5,7 @@
 
 import sys
 from pathlib import Path
+from datetime import datetime
 
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, 
                               QTextBrowser, QTextEdit, QPushButton,
@@ -12,7 +13,6 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
 from PySide6.QtCore import Qt, QThread, QObject, Signal
 from PySide6.QtGui import QTextCursor
 
-# 添加父目录到路径，以便导入模块
 sys.path.insert(0, str(Path(__file__).parent))
 
 from config import ConfigManager
@@ -20,8 +20,17 @@ from memory import ShortTermMemory, LongTermMemory, TempMemory
 from llm import LLMClient, load_identity
 
 
+_HTML_ESCAPE_TABLE = str.maketrans({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#x27;',
+})
+
+
 def _escape_html(text):
-    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;").replace("'", "&#x27;")
+    return text.translate(_HTML_ESCAPE_TABLE)
 
 
 class TalkWorker(QObject):
@@ -205,8 +214,6 @@ class TalkDialog(QDialog):
         cursor = self.chat_display.textCursor()
         cursor.movePosition(QTextCursor.End)
         
-        # 添加时间戳
-        from datetime import datetime
         timestamp = datetime.now().strftime("%H:%M:%S")
         
         if sender == "你":
@@ -287,7 +294,6 @@ class TalkDialog(QDialog):
 
 def show_talk_dialog():
     """显示对话窗口"""
-    from PySide6.QtWidgets import QMessageBox
     import json
 
     app = QApplication.instance()
@@ -338,24 +344,36 @@ def show_talk_dialog():
                 pass
 
     if pending_files:
-        print(f"[Dialog] 发现 {len(pending_files)} 个孤儿对话文件 (short+temp)，正在整理...")
-        QMessageBox.information(None, "提示", "正在整理之前的对话记忆")
-        llm_client = LLMClient(config)
-        identity = load_identity()
-        long_mem = LongTermMemory()
-        processed = 0
-        for filepath, convs, source in pending_files:
-            try:
-                summary = llm_client.generate_summary(convs, identity)
-                long_mem.save_session(convs, summary)
-                filepath.unlink()
-                processed += 1
-                print(f"[Dialog] 已整理 {source}{filepath.name}")
-            except Exception as e:
-                print(f"[Dialog] 整理 {source}{filepath.name} 失败: {e}")
-                break
-        if processed > 0:
-            QMessageBox.information(None, "提示", f"已整理 {processed} 个之前的对话到长期记忆")
+        print(f"[Dialog] 发现 {len(pending_files)} 个孤儿对话文件，将在后台整理...")
+
+        class CleanupWorker(QObject):
+            finished = Signal(int)
+            def do_cleanup(self):
+                cnt = 0
+                llm = LLMClient(config)
+                ident = load_identity()
+                long_mem = LongTermMemory()
+                for filepath, convs, source in pending_files:
+                    try:
+                        summary = llm.generate_summary(convs, ident)
+                        long_mem.save_session(convs, summary)
+                        filepath.unlink()
+                        cnt += 1
+                        print(f"[Dialog] 已整理 {source}{filepath.name}")
+                    except Exception as e:
+                        print(f"[Dialog] 整理 {source}{filepath.name} 失败: {e}")
+                        break
+                self.finished.emit(cnt)
+
+        cleanup_thread = QThread()
+        cleanup_worker = CleanupWorker()
+        cleanup_worker.moveToThread(cleanup_thread)
+        cleanup_worker.finished.connect(
+            lambda n: (QMessageBox.information(None, "提示", f"已整理 {n} 个之前的对话到长期记忆") if n else None, cleanup_thread.quit())
+        )
+        cleanup_thread.started.connect(cleanup_worker.do_cleanup)
+        cleanup_thread.finished.connect(cleanup_thread.deleteLater)
+        cleanup_thread.start()
 
     dialog = TalkDialog()
     dialog.exec_()

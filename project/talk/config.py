@@ -27,6 +27,8 @@ class ConfigManager:
         
         self.config_path = Path(config_path)
         self._config = None
+        self._cached_api_key = None
+        self._migration_done = False
         self.load()
     
     def load(self):
@@ -56,7 +58,10 @@ class ConfigManager:
             return False
 
     def _migrate_api_keys(self):
-        """将配置文件中的旧 api_key 迁移到注册表并从内存中移除"""
+        """将配置文件中的旧 api_key 迁移到注册表并从内存中移除（仅执行一次）"""
+        if self._migration_done:
+            return
+        self._migration_done = True
         modified = False
         for provider in ("deepseek", "openai"):
             provider_config = self._config.get(provider, {})
@@ -184,10 +189,12 @@ class ConfigManager:
     
     @property
     def api_key(self):
-        """获取API密钥，从持久化环境变量读取"""
-        provider = self.provider.upper()
-        env_key = f"{provider}_API_KEY"
-        return self._get_registry_key(env_key)
+        """获取API密钥，从持久化环境变量读取（首次读取后缓存）"""
+        if self._cached_api_key is None:
+            provider = self.provider.upper()
+            env_key = f"{provider}_API_KEY"
+            self._cached_api_key = self._get_registry_key(env_key)
+        return self._cached_api_key
     
     @api_key.setter
     def api_key(self, value):

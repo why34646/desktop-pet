@@ -43,7 +43,7 @@ class ShortTermMemory:
             return self.new_session()
         
         # 按修改时间排序，获取最新的
-        latest_file = max(json_files, key=lambda p: p.stat().st_mtime)
+        latest_file = max(json_files, key=lambda p: int(p.stem.split('_')[1]))
         
         try:
             with open(latest_file, 'r', encoding='utf-8') as f:
@@ -175,6 +175,7 @@ class LongTermMemory:
 
         self.memory_path = Path(memory_path)
         self.memory_path.mkdir(parents=True, exist_ok=True)
+        self._summaries_cache = None
     
     def save_session(self, conversations, summary=None):
         """
@@ -213,7 +214,9 @@ class LongTermMemory:
                     f.write(summary)
             except Exception as e:
                 print(f"保存摘要失败: {e}")
-        
+
+        self._summaries_cache = None
+
         return session_folder
     
     def get_latest_summary(self):
@@ -269,6 +272,9 @@ class LongTermMemory:
         Returns:
             [(folder_name, summary_text), ...] 列表
         """
+        if self._summaries_cache is not None:
+            return self._summaries_cache
+
         results = []
         folders = sorted([p for p in self.memory_path.iterdir() if p.is_dir()],
                         key=lambda p: p.name, reverse=True)
@@ -282,6 +288,7 @@ class LongTermMemory:
                 except Exception:
                     continue
 
+        self._summaries_cache = results
         return results
 
     def get_history_by_folders(self, folder_names):

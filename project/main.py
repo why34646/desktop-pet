@@ -25,6 +25,8 @@ class DesktopPet(QMainWindow):
         self.min_size = 64
         self.max_size = 512
         self.pet_name = ""
+        self.scaled_frames = []
+        self.screen_geo = None
         self.temp_pos_file = Path(__file__).parent.parent / ".temp_pos"
         self.resize_cmd_file = Path(__file__).parent.parent / ".resize_cmd"
         self.name_update_file = Path(__file__).parent.parent / ".name_update"
@@ -84,11 +86,21 @@ class DesktopPet(QMainWindow):
         """加载当前动作的帧数据"""
         self.animation_frames = self.state_manager.get_current_frames()
         self.current_frame = 0
+        self._update_scaled_frames()
         
     def load_sleep_frames(self, stage):
         """加载睡觉指定阶段的帧"""
         self.animation_frames = self.state_manager.load_sleep_frames(stage)
         self.current_frame = 0
+        self._update_scaled_frames()
+
+    def _update_scaled_frames(self):
+        self.scaled_frames = []
+        for frame in self.animation_frames:
+            if not frame.isNull():
+                self.scaled_frames.append(
+                    frame.scaled(self.pet_size, self.pet_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                )
         
     def switch_action(self, action_name):
         """切换到指定动作"""
@@ -185,12 +197,11 @@ class DesktopPet(QMainWindow):
     
     def paintEvent(self, event):
         painter = QPainter(self)
-        if self.animation_frames and 0 <= self.current_frame < len(self.animation_frames):
-            frame = self.animation_frames[self.current_frame]
-            scaled_frame = frame.scaled(self.pet_size, self.pet_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            x = (self.width() - scaled_frame.width()) // 2
-            y = (self.height() - scaled_frame.height()) // 2
-            painter.drawPixmap(x, y, scaled_frame)
+        if self.scaled_frames and 0 <= self.current_frame < len(self.scaled_frames):
+            frame = self.scaled_frames[self.current_frame]
+            x = (self.width() - frame.width()) // 2
+            y = (self.height() - frame.height()) // 2
+            painter.drawPixmap(x, y, frame)
         
         if self.resizing:
             pen = QPen(QColor(0, 0, 255), 3)
@@ -199,6 +210,7 @@ class DesktopPet(QMainWindow):
             
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
+            self.screen_geo = QApplication.primaryScreen().availableGeometry()
             if self.resizing:
                 self.dragging = True
                 self.drag_position = event.globalPosition().toPoint()
@@ -220,21 +232,17 @@ class DesktopPet(QMainWindow):
                 if new_size != self.pet_size:
                     self.pet_size = new_size
                     self.resize(self.pet_size, self.pet_size)
+                    self._update_scaled_frames()
             else:
                 new_pos = event.globalPosition().toPoint() - self.drag_position
                 
-                # 获取屏幕边界
-                screen_geo = QApplication.primaryScreen().availableGeometry()
-                
-                # 扩大移动范围，四周留出约35像素
                 margin = 35
+                sg = self.screen_geo
+                if sg is None:
+                    sg = QApplication.primaryScreen().availableGeometry()
             
-                
-                # 限制X坐标：窗口左边界可以超出左边界35像素，右边界可以超出右边界35像素
-                x = max(-margin, min(new_pos.x(), screen_geo.width() - self.width() + margin))
-                
-                # 限制Y坐标：窗口上边界可以超出上边界35像素，下边界可以超出下边界35像素
-                y = max(-margin, min(new_pos.y(), screen_geo.height() - self.height() + margin))
+                x = max(-margin, min(new_pos.x(), sg.width() - self.width() + margin))
+                y = max(-margin, min(new_pos.y(), sg.height() - self.height() + margin))
                 
                 self.move(x, y)
             event.accept()
@@ -331,7 +339,7 @@ class DesktopPet(QMainWindow):
         except Exception:
             pass
         
-        QTimer.singleShot(100, self.check_resize_cmd)
+        QTimer.singleShot(500, self.check_resize_cmd)
         
     def show_name(self):
         if self.pet_name:

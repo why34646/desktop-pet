@@ -39,6 +39,7 @@ class LLMClient:
             config_manager: 配置管理器实例
         """
         self.config = config_manager
+        self.session = requests.Session()
         self.reload_config()
     
     def reload_config(self):
@@ -77,7 +78,7 @@ class LLMClient:
             data.update(self.extra_params)
         
         try:
-            response = requests.post(
+            response = self.session.post(
                 self.api_url,
                 headers=headers,
                 json=data,
@@ -189,7 +190,7 @@ class LLMClient:
     
     def generate_summary(self, conversations, system_prompt):
         """
-        生成对话摘要（独立发送请求，不包含 extra_params）
+        生成对话摘要
 
         Args:
             conversations: 对话记录列表
@@ -213,30 +214,7 @@ class LLMClient:
             {"role": "user", "content": f"请总结以下对话：\n\n{conversation_text}"}
         ]
 
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}"
-        }
-
-        data = {
-            "model": self.model,
-            "messages": messages,
-            "temperature": 0.5
-        }
-
-        try:
-            response = requests.post(
-                self.api_url, headers=headers, json=data, timeout=self.timeout
-            )
-            if response.status_code == 200:
-                result = response.json()
-                return result["choices"][0]["message"]["content"]
-            else:
-                raise Exception(f"摘要API请求失败: {response.status_code}")
-        except requests.exceptions.Timeout:
-            raise Exception("摘要请求超时")
-        except requests.exceptions.ConnectionError:
-            raise Exception("无法连接到API服务器")
+        return self._make_request(messages)
 
 
 def load_identity(identity_path=None):

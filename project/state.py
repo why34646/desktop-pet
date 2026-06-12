@@ -2,6 +2,13 @@ from pathlib import Path
 from PySide6.QtGui import QPixmap
 
 
+def _safe_stem_number(p):
+    try:
+        return int(p.stem)
+    except ValueError:
+        return float('inf')
+
+
 class StateManager:
     def __init__(self, assets_path):
         self.assets_path = Path(assets_path)
@@ -33,7 +40,7 @@ class StateManager:
         try:
             png_files = sorted(
                 [f for f in action_path.iterdir() if f.suffix.lower() == '.png'],
-                key=lambda x: int(x.stem)
+                key=_safe_stem_number
             )
             for png_file in png_files:
                 pixmap = QPixmap(str(png_file))
@@ -82,7 +89,7 @@ class StateManager:
         try:
             png_files = sorted(
                 [f for f in stage_path.iterdir() if f.suffix.lower() == '.png'],
-                key=lambda x: int(x.stem)
+                key=_safe_stem_number
             )
             for png_file in png_files:
                 pixmap = QPixmap(str(png_file))
