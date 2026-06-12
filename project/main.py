@@ -261,6 +261,9 @@ class DesktopPet(QMainWindow):
         
         menu.addSeparator()
         
+        talk_action = menu.addAction("对话")
+        talk_action.triggered.connect(self.show_talk)
+        
         settings_action = menu.addAction("设置")
         settings_action.triggered.connect(self.show_settings)
         
@@ -278,6 +281,11 @@ class DesktopPet(QMainWindow):
         self.save_position()
         set_script = Path(__file__).parent / "set.py"
         subprocess.Popen([sys.executable, str(set_script)])
+        
+    def show_talk(self):
+        """显示对话窗口"""
+        talk_script = Path(__file__).parent / "talk.py"
+        subprocess.Popen([sys.executable, str(talk_script)])
         
     def save_position(self):
         try:

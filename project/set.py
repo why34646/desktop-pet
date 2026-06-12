@@ -72,7 +72,11 @@ class SettingsDialog(QDialog):
         change_name_btn = QPushButton("更改姓名")
         change_name_btn.clicked.connect(self.change_name)
         layout.addWidget(change_name_btn)
-        
+
+        talk_settings_btn = QPushButton("对话模型")
+        talk_settings_btn.clicked.connect(self.open_talk_settings)
+        layout.addWidget(talk_settings_btn)
+
         resize_btn = QPushButton("调整大小")
         resize_btn.clicked.connect(self.start_resize)
         layout.addWidget(resize_btn)
@@ -176,6 +180,15 @@ class SettingsDialog(QDialog):
             QMessageBox.information(self, "成功", "姓名已更新！")
         except Exception as e:
             QMessageBox.critical(self, "错误", f"保存失败：{str(e)}")
+    
+    def open_talk_settings(self):
+        """打开对话模型设置窗口"""
+        try:
+            from talk.talk_settings import TalkSettingsDialog
+            dialog = TalkSettingsDialog(self)
+            dialog.exec_()
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"无法打开对话模型设置：{str(e)}")
     
     def start_resize(self):
         try:
