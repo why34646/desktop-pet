@@ -5,27 +5,76 @@
 
 import json
 import winreg
+import sys
 from pathlib import Path
+
+
+def _get_app_root():
+    """返回应用根目录（用户可写文件路径）。
+
+    - 打包模式: exe 所在目录 (dist/DesktopPet/)
+    - 开发模式: 项目根目录
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent.parent
+
+
+def _get_data_root():
+    """返回资源根目录（只读资源路径）。
+
+    - 打包模式: PyInstaller 的 _internal/ 目录 (sys._MEIPASS)
+    - 开发模式: 同 _get_app_root()
+    """
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            return Path(meipass)
+        exe_dir = Path(sys.executable).resolve().parent
+        if (exe_dir / "_internal" / "talk").exists():
+            return exe_dir / "_internal"
+        return exe_dir
+    return _get_app_root()
 
 
 class ConfigManager:
     """配置管理器类"""
 
     ALLOWED_EXTRA_PARAMS = {"reasoning_effort", "thinking"}
-    
+
     def __init__(self, config_path=None):
         """
         初始化配置管理器
-        
+
+        路径策略:
+        - 开发模式: 读写同一个 talk/config.json (位于项目根目录)
+        - 打包模式: 默认从 _internal/talk/config.json 读取初始值，
+          但读写都在 exe 同目录的 talk/config.json（确保配置持久化）
+
         Args:
-            config_path: 配置文件路径，默认使用项目根目录下的 talk/config.json
+            config_path: 配置文件路径，默认使用应用根目录下的 talk/config.json
         """
         if config_path is None:
-            # 获取项目根目录
-            project_root = Path(__file__).parent.parent
-            config_path = project_root / "talk" / "config.json"
-        
-        self.config_path = Path(config_path)
+            # 用户可写目录下的 config.json（用于读写）
+            user_root = _get_app_root()
+            self.config_path = user_root / "talk" / "config.json"
+
+            # 若用户配置文件尚不存在，但资源目录下有默认配置，则复制一份
+            if not self.config_path.exists():
+                data_root = _get_data_root()
+                default_cfg = data_root / "talk" / "config.json"
+                if default_cfg.exists() and default_cfg != self.config_path:
+                    try:
+                        self.config_path.parent.mkdir(parents=True, exist_ok=True)
+                        with open(default_cfg, 'r', encoding='utf-8') as src:
+                            content = src.read()
+                        with open(self.config_path, 'w', encoding='utf-8') as dst:
+                            dst.write(content)
+                    except Exception:
+                        # 复制失败也不致命，后续用默认配置
+                        pass
+        else:
+            self.config_path = Path(config_path)
         self._config = None
         self._cached_api_key = None
         self._migration_done = False
@@ -106,6 +155,7 @@ class ConfigManager:
                 "model": "deepseek-v4-pro",
                 "max_retries": 3,
                 "timeout": 60,
+                "max_context_tokens": 4000,
                 "extra_params": {
                     "reasoning_effort": "high",
                     "thinking": {"type": "enabled"}
@@ -116,6 +166,7 @@ class ConfigManager:
                 "model": "gpt-3.5-turbo",
                 "max_retries": 3,
                 "timeout": 60,
+                "max_context_tokens": 4000,
                 "extra_params": {}
             }
         }
@@ -232,3 +283,8 @@ class ConfigManager:
         if not isinstance(raw, dict):
             return {}
         return {k: v for k, v in raw.items() if k in self.ALLOWED_EXTRA_PARAMS}
+
+    def get_max_context_tokens(self):
+        """获取最大上下文 token 数（默认 4000）"""
+        cfg = self.get_current_provider_config()
+        return cfg.get("max_context_tokens", 4000)

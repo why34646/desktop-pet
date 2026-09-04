@@ -5,13 +5,35 @@ LLM请求模块
 
 import json
 import time
+import sys
+import re
 import requests
 from pathlib import Path
 
 
+def _get_app_root():
+    """返回应用根目录（用户可写文件路径）。"""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent.parent
+
+
+def _get_data_root():
+    """返回资源根目录（只读资源路径，identity/ 等）。"""
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            return Path(meipass)
+        exe_dir = Path(sys.executable).resolve().parent
+        if (exe_dir / "_internal" / "identity").exists():
+            return exe_dir / "_internal"
+        return exe_dir
+    return _get_app_root()
+
+
 class LLMClient:
     """大模型API客户端"""
-    
+
     # 历史判断的系统提示词
     HISTORY_CHECK_SYSTEM = """你是一个对话助手。用户正在询问是否需要查看历史对话来回答当前问题。
 请判断当前问题是否需要查看历史对话才能回答。
@@ -24,12 +46,14 @@ class LLMClient:
 只回答以上格式，不要回答其他内容。"""
     
     # 摘要生成的系统提示词
-    SUMMARY_SYSTEM = """你是一个对话总结助手。请将下面的对话内容总结为简洁的记忆摘要。
+    SUMMARY_SYSTEM = """你是一个对话总结助手。请将下面的对话内容总结为结构化的记忆条目。
 要求：
-1. 提取对话中的关键信息、主人提到的重要事项、宠物做出的承诺或约定
-2. 保持摘要简洁，一般不超过200字
-3. 使用自然语言描述，不要使用列表格式
-4. 摘要应该能够帮助记忆之前的对话内容"""
+1. 从对话中提取关键信息、主人提到的重要事项、宠物做出的承诺或约定
+2. 输出严格的 JSON 数组格式，每个元素包含 "content"（记忆内容，不超过100字）和 "tags"（1~3个标签关键词的数组）
+3. 若对话中无实质内容，返回空数组 []
+4. 示例格式：[{"content": "用户答应买小鱼干","tags": ["承诺","食物"]}]
+
+只输出 JSON，不要输出其他内容。"""
 
     def __init__(self, config_manager):
         """
@@ -109,32 +133,68 @@ class LLMClient:
         except Exception as e:
             raise e
     
-    def chat(self, system_prompt, user_input, history_context=""):
+    def chat(self, system_prompt, user_input, mid_context="", history_context="",
+             short_context_msgs=None, max_context_tokens=4000):
         """
-        发送对话请求
-        
+        发送对话请求（带 Token 预算控制和记忆分层上下文）
+
         Args:
-            system_prompt: 系统提示词（身份设定）
+            system_prompt: 系统提示词（身份设定 + 用户画像）
             user_input: 用户输入
-            history_context: 历史上下文（可选）
-            
+            mid_context: 中期记忆上下文字符串
+            history_context: 长期记忆详细历史字符串
+            short_context_msgs: 短期记忆 OpenAI 格式消息列表
+            max_context_tokens: 最大上下文 token 数
+
         Returns:
             AI回复内容
         """
         messages = []
-        
-        # 添加系统提示词
+
+        # 1. system prompt
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
-        
-        # 添加历史上下文
+
+        # 2. 中期记忆（始终带入，role=system）
+        if mid_context:
+            messages.append({"role": "system", "content": f"以下是近期会话摘要：\n{mid_context}"})
+
+        # 3. 长期记忆详细历史（role=system）
         if history_context:
             messages.append({"role": "system", "content": f"以下是历史对话记录：\n{history_context}"})
-        
-        # 添加用户输入
-        messages.append({"role": "user", "content": user_input})
-        
-        return self._make_request(messages)
+
+        # 4. 短期记忆对话历史（user/assistant 交替）
+        if short_context_msgs and isinstance(short_context_msgs, list):
+            for msg in short_context_msgs:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                if role in ("user", "assistant") and content:
+                    messages.append({"role": role, "content": content})
+
+        # 5. 当前用户输入
+        user_msg = {"role": "user", "content": user_input}
+
+        # Token 预算截断（截断中间上下文，保持 system + user 不变）
+        budget = TokenBudget(max_context_tokens)
+        kept_messages = budget.truncate_context(
+            [m for m in messages if m["role"] == "system" and m["content"] != system_prompt],
+            system_prompt, user_input
+        )
+
+        # 重建最终消息列表
+        final_messages = []
+        if system_prompt:
+            final_messages.append({"role": "system", "content": system_prompt})
+        final_messages.extend(kept_messages)
+        if short_context_msgs and isinstance(short_context_msgs, list):
+            for msg in short_context_msgs:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                if role in ("user", "assistant") and content:
+                    final_messages.append({"role": role, "content": content})
+        final_messages.append(user_msg)
+
+        return self._make_request(final_messages)
     
     def check_need_history(self, user_input, short_context="", summaries=None):
         """
@@ -190,23 +250,22 @@ class LLMClient:
     
     def generate_summary(self, conversations, system_prompt):
         """
-        生成对话摘要
+        生成结构化记忆条目
 
         Args:
             conversations: 对话记录列表
-            system_prompt: 系统提示词
+            system_prompt: 系统提示词（未使用，保留以兼容调用方）
 
         Returns:
-            摘要内容
+            list: [{"content": "...", "tags": ["标签"]}, ...]
         """
         if not conversations:
-            return ""
+            return []
 
         formatted = []
         for conv in conversations:
             formatted.append(f"用户: {conv.get('user', '')}")
             formatted.append(f"助手: {conv.get('assistant', '')}")
-
         conversation_text = "\n".join(formatted)
 
         messages = [
@@ -214,7 +273,70 @@ class LLMClient:
             {"role": "user", "content": f"请总结以下对话：\n\n{conversation_text}"}
         ]
 
-        return self._make_request(messages)
+        response = self._make_request(messages).strip()
+
+        # 尝试解析 JSON 数组
+        try:
+            json_match = re.search(r'\[.*\]', response, re.DOTALL)
+            if json_match:
+                entries = json.loads(json_match.group())
+                if isinstance(entries, list):
+                    return entries
+        except Exception:
+            pass
+
+        # 回退：生成一条默认 entry
+        return [{"content": response[:200], "tags": []}]
+
+    # 用户画像提取的系统提示词
+    PROFILE_UPDATE_SYSTEM = """你是一个用户画像分析助手。请从对话中提取用户偏好、习惯和重要事件。
+要求：
+1. 只输出有明确依据的信息，不要臆测
+2. 输出严格的 JSON 格式，包含以下字段（若某项无内容则为空对象或空数组）：
+   - preferences_to_update: {"key": "value"} 格式的用户偏好
+   - new_habits: [{"habit": "习惯描述", "confidence": "high/medium/low"}]
+   - new_events: [{"date": "YYYY-MM-DD", "event": "事件描述", "source_session": ""}]
+3. 若对话中无新信息，返回 {"preferences_to_update": {}, "new_habits": [], "new_events": []}
+
+只输出 JSON，不要输出其他内容。"""
+
+    def generate_profile_update(self, conversations, current_profile_json, identity):
+        """
+        从对话中提取并更新用户画像
+
+        Args:
+            conversations: 对话记录列表
+            current_profile_json: 当前画像 JSON 字符串
+            identity: 身份设定文本
+
+        Returns:
+            dict: {"preferences_to_update": {}, "new_habits": [], "new_events": []}
+        """
+        if not conversations:
+            return {"preferences_to_update": {}, "new_habits": [], "new_events": []}
+
+        formatted = []
+        for conv in conversations:
+            formatted.append(f"用户: {conv.get('user', '')}")
+            formatted.append(f"助手: {conv.get('assistant', '')}")
+        conversation_text = "\n".join(formatted)
+
+        messages = [
+            {"role": "system", "content": self.PROFILE_UPDATE_SYSTEM},
+            {"role": "system", "content": f"当前用户画像：\n{current_profile_json}\n\n身份设定：\n{identity}"},
+            {"role": "user", "content": f"请分析以下对话，提取用户信息：\n\n{conversation_text}"}
+        ]
+
+        response = self._make_request(messages).strip()
+
+        try:
+            json_match = re.search(r'\{.*\}', response, re.DOTALL)
+            if json_match:
+                return json.loads(json_match.group())
+        except Exception:
+            pass
+
+        return {"preferences_to_update": {}, "new_habits": [], "new_events": []}
 
 
 def load_identity(identity_path=None):
@@ -228,8 +350,7 @@ def load_identity(identity_path=None):
         身份设定文本
     """
     if identity_path is None:
-        project_root = Path(__file__).parent.parent.parent
-        identity_path = project_root / "identity" / "personality.txt"
+        identity_path = _get_data_root() / "identity" / "personality.txt"
     
     identity_path = Path(identity_path)
     
@@ -242,3 +363,67 @@ def load_identity(identity_path=None):
     
     # 默认身份设定
     return """你是一只傲娇小猫，说话语气别扭、嘴硬，表面冷淡不在意，实则愿意陪伴对方。用词软萌带点小脾气，不会过分热情，常口是心非，回应简短可爱，符合猫咪的神态与性格。"""
+
+
+class TokenBudget:
+    """Token 预算管理器（无 tiktoken 依赖，基于字符数估算）"""
+
+    @staticmethod
+    def _estimate_tokens(text):
+        """估算文本 token 数（粗略）：中文 1.5 token/字，英文 0.75 token/字符"""
+        if not text:
+            return 0
+        chinese = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
+        other = len(text) - chinese
+        return int(chinese * 1.5 + other * 0.75)
+
+    @staticmethod
+    def estimate_messages_tokens(messages):
+        """估算 OpenAI 格式 messages 列表总 token 数"""
+        total = 0
+        for msg in messages:
+            total += 4  # 每个消息 overhead
+            total += TokenBudget._estimate_tokens(msg.get("role", ""))
+            total += TokenBudget._estimate_tokens(msg.get("content", ""))
+        return total
+
+    def __init__(self, max_tokens=4000):
+        self.max_tokens = max_tokens
+
+    def truncate_context(self, messages, system_msg, user_msg, reserve_tokens=500):
+        """
+        截断中间上下文以满足 token 预算，返回截断后的 messages 列表
+        
+        Args:
+            messages: 待截断的中间上下文（role=system 的中期+长期记忆消息）
+            system_msg: system prompt 字符串（不可截断）
+            user_msg: 当前用户输入字符串（不可截断）
+            reserve_tokens: 为模型回复预留的 token 数
+        
+        Returns:
+            截断后的 messages 列表（不含 system_msg 和 user_msg）
+        """
+        system_tokens = self._estimate_tokens(system_msg)
+        user_tokens = self._estimate_tokens(user_msg)
+        available = self.max_tokens - system_tokens - user_tokens - reserve_tokens
+        if available < 0:
+            available = 500
+
+        before_tokens = self.estimate_messages_tokens(messages)
+        kept = []
+        for msg in messages:
+            msg_tokens = self.estimate_messages_tokens([msg])
+            if available >= msg_tokens:
+                kept.append(msg)
+                available -= msg_tokens
+            else:
+                break
+
+        after_tokens = self.estimate_messages_tokens(kept)
+        print(f"[TokenBudget] 截断前: 总tokens={before_tokens}, 中间上下文={before_tokens - system_tokens - user_tokens}")
+        print(f"[TokenBudget] 截断后: 总tokens={after_tokens + system_tokens + user_tokens}, 中间上下文={after_tokens}")
+
+        if after_tokens == 0 and before_tokens > 0:
+            print("[TokenBudget] 警告：所有中间上下文均被截断，模型无历史参考")
+
+        return kept

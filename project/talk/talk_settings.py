@@ -14,8 +14,37 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QGridLayout,
                                QGroupBox, QApplication)
 from PySide6.QtCore import Qt
 
-# 添加父目录到路径
-sys.path.insert(0, str(Path(__file__).parent))
+def _get_app_root():
+    """返回应用根目录（用户可写文件路径）。"""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent.parent
+
+
+def _get_data_root():
+    """返回资源根目录（只读资源路径，assets/ identity/ talk/config.json 等）。"""
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            return Path(meipass)
+        exe_dir = Path(sys.executable).resolve().parent
+        if (exe_dir / "_internal" / "assets").exists():
+            return exe_dir / "_internal"
+        return exe_dir
+    return _get_app_root()
+
+# 打包模式下，talk 模块可能直接在 exe 目录或在 _MEIPASS 中
+# 开发模式下，talk 模块在 project/talk/ 下
+_root = _get_app_root()
+sys.path.insert(0, str(_root / "talk"))
+sys.path.insert(0, str(_root / "project"))
+sys.path.insert(0, str(_root / "project" / "talk"))
+# 确保 _MEIPASS（PyInstaller 临时解压目录）也被搜索
+_meipass = getattr(sys, "_MEIPASS", None)
+if _meipass:
+    sys.path.insert(0, str(Path(_meipass)))
+    sys.path.insert(0, str(Path(_meipass) / "talk"))
+
 from config import ConfigManager
 
 

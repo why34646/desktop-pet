@@ -1,155 +1,164 @@
 import os
 import sys
-import subprocess
 import ctypes
 from pathlib import Path
 
+# ——— 路径设置 ———
+# PyInstaller 打包: exe 所在目录
+# 开发模式:       start.py 所在目录
+if getattr(sys, "frozen", False):
+    _app_root = Path(sys.executable).resolve().parent
+else:
+    _app_root = Path(__file__).resolve().parent
 
-def check_pet_name():
-    basic_path = Path(__file__).parent / "basic.txt"
+# 把 project/ 加入 sys.path, 让 `import main`, `import name` 等生效
+sys.path.insert(0, str(_app_root / "project"))
 
-    if not basic_path.exists():
-        return False
-
-    try:
-        with open(basic_path, 'r', encoding='utf-8') as f:
-            content = f.read().strip()
-            return bool(content)
-    except Exception:
-        return False
-
-
-def get_console_setting():
-    """读取显示运行框设置"""
-    console_file = Path(__file__).parent / ".console_show"
+# ——— 显示运行框 (控制台显示切换) ———
+# 开发模式: 由 python.exe / pythonw.exe 自动决定
+# 打包模式: 用 Win32 API 动态分配/释放控制台
+def _apply_console_setting():
+    """根据 .console_show 文件决定是否显示控制台窗口"""
+    console_file = _app_root / ".console_show"
+    show = False
     if console_file.exists():
         try:
             with open(console_file, 'r', encoding='utf-8') as f:
-                return f.read().strip() == "1"
+                show = f.read().strip() == "1"
         except Exception:
             pass
-    return False
 
+    if not getattr(sys, "frozen", False):
+        return  # 开发模式由 python.exe/pythonw.exe 决定，不做额外处理
 
-def get_python_exe():
-    """根据设置获取正确的 Python 可执行文件"""
-    show_console = get_console_setting()
-    python_exe = sys.executable
-    if show_console:
-        if "pythonw.exe" in python_exe.lower():
-            python_exe = python_exe.lower().replace("pythonw.exe", "python.exe")
-    else:
-        if "pythonw.exe" not in python_exe.lower():
-            python_exe = python_exe.replace("python.exe", "pythonw.exe")
-    return python_exe
+    kernel32 = ctypes.windll.kernel32
+    user32 = ctypes.windll.user32
+    GetConsoleWindow = kernel32.GetConsoleWindow
+    ShowWindow = user32.ShowWindow
+    SW_HIDE = 0
+    SW_SHOW = 5
 
-
-def relaunch_with_correct_exe():
-    """检查当前可执行文件是否匹配设置，不匹配则重新启动"""
-    correct_exe = get_python_exe()
-    current_exe = sys.executable
-    if correct_exe.lower() != current_exe.lower():
-        subprocess.Popen([correct_exe, str(Path(__file__))])
-        sys.exit(0)
-
-
-def setup_console_icon():
-    """将 assets/idle 中的 PNG 转换为图标并设置为控制台窗口图标"""
-    try:
-        from PIL import Image
-    except ImportError:
-        return
-
-    project_root = Path(__file__).parent
-    idle_dir = project_root / "assets" / "idle"
-    ico_path = project_root / "assets" / "console.ico"
-
-    png_files = sorted(idle_dir.glob("*.png"))
-    if not png_files:
-        return
-
-    if not ico_path.exists():
-        try:
-            img = Image.open(png_files[0])
-            img.save(ico_path, format="ICO")
-        except Exception:
-            return
-
-    try:
-        user32 = ctypes.windll.user32
-        kernel32 = ctypes.windll.kernel32
-
-        hwnd = kernel32.GetConsoleWindow()
+    hwnd = GetConsoleWindow()
+    if show:
+        # 尝试分配控制台并显示
         if not hwnd:
-            return
+            kernel32.AllocConsole()
+            hwnd = GetConsoleWindow()
+        if hwnd:
+            ShowWindow(hwnd, SW_SHOW)
+    else:
+        # 隐藏或释放控制台
+        if hwnd:
+            ShowWindow(hwnd, SW_HIDE)
 
-        IMAGE_ICON = 1
-        LR_LOADFROMFILE = 0x00000010
-        WM_SETICON = 0x0080
-        ICON_BIG = 1
-        ICON_SMALL = 0
-        SMTO_ABORTIFHUNG = 0x0002
-        RDW_INVALIDATE = 0x0001
-        RDW_UPDATENOW = 0x0100
-        RDW_ALLCHILDREN = 0x0080
+_apply_console_setting()
 
-        hicon_big = user32.LoadImageW(0, str(ico_path), IMAGE_ICON, 32, 32, LR_LOADFROMFILE)
-        hicon_small = user32.LoadImageW(0, str(ico_path), IMAGE_ICON, 16, 16, LR_LOADFROMFILE)
 
-        # 1) 用 SendMessageTimeoutW 设置窗口图标（跨进程 conhost.exe 更可靠）
-        result_ptr = ctypes.c_ulong(0)
-        if hicon_big:
-            user32.SendMessageTimeoutW(
-                hwnd, WM_SETICON, ICON_BIG, hicon_big,
-                SMTO_ABORTIFHUNG, 2000, ctypes.byref(result_ptr)
-            )
-        if hicon_small:
-            user32.SendMessageTimeoutW(
-                hwnd, WM_SETICON, ICON_SMALL, hicon_small,
-                SMTO_ABORTIFHUNG, 2000, ctypes.byref(result_ptr)
-            )
-
-        # 2) SetConsoleIcon（kernel32）
+def _auto_create_basic_txt():
+    """如果 basic.txt 不存在, 就动态创建一个空文件"""
+    basic_path = _app_root / "basic.txt"
+    if not basic_path.exists():
         try:
-            if hicon_big:
-                kernel32.SetConsoleIcon(hicon_big)
+            basic_path.touch()
         except Exception:
             pass
 
-        # 3) 强制刷新窗口
-        try:
-            user32.RedrawWindow(hwnd, None, None, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN)
-        except Exception:
-            pass
 
+def check_pet_name():
+    """检查 basic.txt 中是否已有有效的名字"""
+    basic_path = _app_root / "basic.txt"
+    if not basic_path.exists():
+        return False
+    try:
+        with open(basic_path, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+            # 只看第一行(名字行), 若有非空内容就视为已有名字
+            first_line = content.splitlines()[0].strip() if content else ""
+            return bool(first_line)
     except Exception:
-        pass
+        return False
 
 
-def run_name_script():
-    name_script = Path(__file__).parent / "project" / "name.py"
-    python_exe = get_python_exe()
-    subprocess.run([python_exe, str(name_script)], check=True)
+def _show_name_dialog():
+    """弹出名字输入窗口, 保存到 basic.txt"""
+    from PySide6.QtWidgets import QApplication, QDialog, QVBoxLayout, QLabel
+    from PySide6.QtWidgets import QLineEdit, QPushButton, QMessageBox, QHBoxLayout
 
+    # 确保有 QApplication 实例
+    app = QApplication.instance()
+    own_app = False
+    if app is None:
+        app = QApplication(sys.argv)
+        own_app = True
 
-def run_main_script():
-    main_script = Path(__file__).parent / "project" / "main.py"
-    python_exe = get_python_exe()
-    subprocess.run([python_exe, str(main_script)], check=True)
+    class NameInputDialog(QDialog):
+        def __init__(self):
+            super().__init__()
+            self.setWindowTitle("给小猫起个名字")
+            self.resize(320, 130)
+
+            layout = QVBoxLayout(self)
+            layout.addWidget(QLabel("请输入小猫的名字:"))
+
+            self.name_input = QLineEdit()
+            layout.addWidget(self.name_input)
+
+            btn_layout = QHBoxLayout()
+            btn_layout.addStretch()
+            ok_btn = QPushButton("确定")
+            cancel_btn = QPushButton("取消")
+            btn_layout.addWidget(ok_btn)
+            btn_layout.addWidget(cancel_btn)
+            layout.addLayout(btn_layout)
+
+            ok_btn.clicked.connect(self._on_ok)
+            cancel_btn.clicked.connect(self.reject)
+
+        def _on_ok(self):
+            name = self.name_input.text().strip()
+            if not name:
+                QMessageBox.warning(self, "提示", "名字不能为空")
+                return
+            # 保存到 basic.txt (保留第二行大小值, 若存在)
+            basic_path = _app_root / "basic.txt"
+            existing_size = ""
+            if basic_path.exists():
+                try:
+                    with open(basic_path, "r", encoding="utf-8") as f:
+                        lines = f.read().splitlines()
+                        if len(lines) > 1 and lines[1].strip():
+                            existing_size = "\n" + lines[1].strip()
+                except Exception:
+                    pass
+            try:
+                with open(basic_path, "w", encoding="utf-8") as f:
+                    f.write(name + existing_size)
+                self.accept()
+            except Exception as e:
+                QMessageBox.critical(self, "错误", f"保存失败: {e}")
+
+    dialog = NameInputDialog()
+    result = dialog.exec_()
+
+    if own_app:
+        app.quit()
+
+    return result == QDialog.Accepted
 
 
 def main():
-    relaunch_with_correct_exe()
+    # 确保 basic.txt 存在
+    _auto_create_basic_txt()
 
-    if get_console_setting():
-        setup_console_icon()
+    # 若还没有名字, 先弹出名字输入窗口
+    if not check_pet_name():
+        ok = _show_name_dialog()
+        if not ok or not check_pet_name():
+            return  # 用户取消了, 直接退出
 
-    if check_pet_name():
-        run_main_script()
-    else:
-        run_name_script()
-        if check_pet_name():
-            run_main_script()
+    # 启动主程序 (桌面小猫)
+    import main as _main
+    _main.run_pet()
 
 
 if __name__ == "__main__":

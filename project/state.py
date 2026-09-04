@@ -18,7 +18,8 @@ class StateManager:
             'idle': '待机中...',
             'lickfur': '舔毛',
             'dance': '跳舞',
-            'sleep': '睡觉'
+            'sleep': '睡觉',
+            'bixin': '比心'
         }
         
         self.current_action = 'idle'

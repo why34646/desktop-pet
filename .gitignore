@@ -26,3 +26,20 @@ memory/
 # ===== 操作系统文件 =====
 Thumbs.db
 desktop.ini
+
+# ===== PyInstaller 构建产物（含 Win7 降级版）=====
+build/
+dist/
+venv_win7/
+build_win7/
+dist_win7/
+
+# ===== 运行时数据 / 用户配置（不纳入版本库）=====
+/talk/
+/identity/
+.console_show
+.uploads/
+
+# ===== 通用虚拟环境 =====
+venv/
+.venv/
